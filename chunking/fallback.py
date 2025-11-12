@@ -10,6 +10,13 @@ def write_final_segs_ones(tile_path: Union[str, Path]) -> None:
     las = laspy.read(str(path))
     num_points = int(len(las.x))
     final_labels = np.ones(num_points, dtype=np.int32)
+    zeros_labels = np.zeros(num_points, dtype=np.int32)
+    if "init_segs" not in las.point_format.extra_dimension_names:
+        las.add_extra_dim(laspy.ExtraBytesParams(name="init_segs", type="int32", description="init_segs"))
+    las.init_segs = zeros_labels
+    if "intermediate_segs" not in las.point_format.extra_dimension_names:
+        las.add_extra_dim(laspy.ExtraBytesParams(name="intermediate_segs", type="int32", description="intermediate_segs"))
+    las.intermediate_segs = zeros_labels
     if "final_segs" not in las.point_format.extra_dimension_names:
         las.add_extra_dim(laspy.ExtraBytesParams(name="final_segs", type="int32", description="final_segs"))
     las.final_segs = final_labels
