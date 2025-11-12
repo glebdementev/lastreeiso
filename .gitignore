@@ -1,2 +1,4 @@
 .venv
 .venv/
+*.las
+__pycache__/
