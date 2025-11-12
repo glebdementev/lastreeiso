@@ -1,4 +1,5 @@
 laspy
+lazrs
 numpy<2.0
 scipy
 numpy-indexed
