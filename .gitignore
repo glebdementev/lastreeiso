@@ -2,3 +2,4 @@
 .venv/
 *.las
 __pycache__/
+tiles/

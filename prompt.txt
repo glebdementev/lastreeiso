@@ -1,0 +1,14 @@
+
+i want you to implement the following tile merging algorithm:
+
+1. take all points from all tiles and just put them together in a common point cloud
+2. then, find all points which have exactly the same coordinates
+3. construct a table of pairwise comparison. for all unique final_segs of points obtained in step 2. give values of final_segs horizontally and vertically, and in matrix cells put the count of points which are both in x and y coordinate. the main dialogal should be all zeroes - i.e. no points within the same final_segs value have the same coords. raise if false with explanation. the matrix should be symmetrical along the main diagonal, check this and make sure you drop the lower part. raise error if not symmetrical
+4. get top 10 matrix cells by point count and print them. print rows like 3412 points, segment 34 and 51
+5. for each unique final_segs, look at its ROW and its COLUMN. SUM the values its the cells of its row and column. remember the ids of rows and columns that have values
+6. sort the sums descending. print top 10. e.g., final_seg 31 has a total of 6713 common points: 31 with segment 3, 56 with segment 54 etc.
+7. starting from the final_seg with max sum, bring all points of all segments that intersect it into this segment. so for segment 31, take all points from segment 3 and 54 and set them to id 31. 
+8. deduplicate. print number of deleted points for each segment
+9. make sure there are no holes in the resulting final_segs id. they must start from 1 and then go 2, 3, 4, 5. there must not be holes, move the ids to avoid that
+
+remake @merge.py to support it

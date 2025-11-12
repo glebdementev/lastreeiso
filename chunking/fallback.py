@@ -10,7 +10,8 @@ def write_final_segs_ones(tile_path: Union[str, Path]) -> None:
     las = laspy.read(str(path))
     num_points = int(len(las.x))
     final_labels = np.ones(num_points, dtype=np.int32)
-    las.add_extra_dim(laspy.ExtraBytesParams(name="final_segs", type="int32", description="final_segs"))
+    if "final_segs" not in las.point_format.extra_dimension_names:
+        las.add_extra_dim(laspy.ExtraBytesParams(name="final_segs", type="int32", description="final_segs"))
     las.final_segs = final_labels
     out_path = Path(str(path)[:-4] + "_treeiso.laz")
     out_path.parent.mkdir(parents=True, exist_ok=True)
