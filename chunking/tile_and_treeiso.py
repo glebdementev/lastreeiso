@@ -13,6 +13,8 @@ from chunking.tiler import tile_file
 from chunking.worker import run_treeiso_on_tile
 from chunking.merge import merge_tiles_to_single, processed_tile_path
 from chunking.scramble import scramble_final_segs_in_place
+import numpy as np
+import laspy
 
 
 def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = DEFAULT_CONFIG) -> List[Path]:
@@ -52,6 +54,10 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
     for proc_path in just_processed:
         scramble_final_segs_in_place(proc_path)
 
+    # Ensure global uniqueness of final_segs across tiles before merging
+    if len(processed) > 0:
+        ensure_global_unique_final_segs(processed)
+
     if len(processed) > 0:
         merge_tiles_to_single(processed, merged_out)
         # Scramble final_segs on the merged result as well
@@ -65,6 +71,43 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
                 tile.unlink()
     return tiles
 
+
+def ensure_global_unique_final_segs(processed_paths: List[Path]) -> None:
+    paths_sorted = sorted(processed_paths, key=lambda p: p.name)
+    next_label: int = 1
+    # Remap each tile's labels into a disjoint global range
+    for tile_path in paths_sorted:
+        las = laspy.read(str(tile_path))
+        # Require presence of final_segs on processed tiles
+        has_final = "final_segs" in las.point_format.extra_dimension_names
+        assert has_final, f"Missing final_segs in processed tile: {tile_path}"
+        labels = np.asarray(las.final_segs, dtype=np.int64)
+        if labels.size == 0:
+            # Nothing to do
+            continue
+        unique_vals = np.unique(labels)
+        # Build mapping old -> new contiguous labels
+        mapping: dict[int, int] = {}
+        for val in unique_vals.tolist():
+            mapping[int(val)] = next_label
+            next_label = next_label + 1
+        remapped = np.empty_like(labels)
+        for old, new in mapping.items():
+            remapped[labels == int(old)] = int(new)
+        las.final_segs = remapped.astype(np.int32, copy=False)
+        out_path = tile_path if tile_path.suffix.lower() == ".laz" else tile_path.with_suffix(".laz")
+        las.write(str(out_path))
+    # Validate disjointness across all tiles
+    seen: set[int] = set()
+    for tile_path in paths_sorted:
+        las = laspy.read(str(tile_path))
+        labels = np.asarray(las.final_segs, dtype=np.int64)
+        uniques = np.unique(labels).tolist()
+        for v in uniques:
+            iv = int(v)
+            if iv in seen:
+                raise ValueError(f"final_segs id collision across tiles detected after remap: {iv} in {tile_path.name}")
+            seen.add(iv)
 
 def main() -> None:
     path_input = str(input('Please enter path to LAS/LAZ file: '))

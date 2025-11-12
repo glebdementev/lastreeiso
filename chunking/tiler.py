@@ -11,6 +11,32 @@ def compute_bounds(las: laspy.LasData) -> Tuple[float, float, float, float]:
     return float(las.header.mins[0]), float(las.header.maxs[0]), float(las.header.mins[1]), float(las.header.maxs[1])
 
 
+def deduplicate_points(las: laspy.LasData) -> laspy.LasData:
+    if len(las.points) == 0:
+        return las
+    X = np.asarray(las.X, dtype=np.int64)
+    Y = np.asarray(las.Y, dtype=np.int64)
+    Z = np.asarray(las.Z, dtype=np.int64)
+    coords = np.stack((X, Y, Z), axis=1)
+    _, inv_idx = np.unique(coords, axis=0, return_inverse=True)
+    num_unique = int(np.max(inv_idx) + 1)
+    seen = np.zeros(num_unique, dtype=bool)
+    keep_mask = np.zeros(len(las.points), dtype=bool)
+    for idx_pt in range(len(las.points)):
+        g = int(inv_idx[idx_pt])
+        if not seen[g]:
+            keep_mask[idx_pt] = True
+            seen[g] = True
+    if np.all(keep_mask):
+        return las
+    num_deleted = int(np.sum(~keep_mask))
+    print(f"Deleted {num_deleted} duplicate points (kept {int(np.sum(keep_mask))} unique points)")
+    header = las.header.copy()
+    deduplicated = laspy.LasData(header)
+    deduplicated.points = las.points[keep_mask]
+    return deduplicated
+
+
 def generate_tile_windows(
     min_x: float,
     max_x: float,
@@ -82,6 +108,7 @@ def tile_file(input_path: Union[str, Path], config: TilingConfig) -> List[Path]:
     assert config.overlap < config.tile_size, "Overlap must be smaller than tile size"
 
     las = laspy.read(str(path))
+    las = deduplicate_points(las)
     min_x, max_x, min_y, max_y = compute_bounds(las)
     xs = las.x
     ys = las.y
