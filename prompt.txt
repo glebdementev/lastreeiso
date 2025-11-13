@@ -12,3 +12,16 @@ i want you to implement the following tile merging algorithm:
 9. make sure there are no holes in the resulting final_segs id. they must start from 1 and then go 2, 3, 4, 5. there must not be holes, move the ids to avoid that
 
 remake @merge.py to support it
+
+see @tile_and_treeiso.py 
+
+change the process 
+
+1. tile as previously, but delete overlap
+2. to start segmenting, take a block at coordinates x0 y0. process that single tile
+3. then, create brand new bordering_clusters_detector.py. what it should do is create a list of borders (for instance, x0 y0 borders x1 y0 and x0 y1) and for each border detect the segments that border it.
+3.1. how to detect bordering segments? first, for a border direction figure out the axis - e.g. positive Y, positive X. then, produce a list of all segments and sort them by max value descending.
+3.2. in this list, take all segments within the threshold 1. set threshold as glob var
+3.3. delete the bordering segments from tile source
+4. then start segmenting x1 y0 and x0 y1, but to each of these segments add the respective bordering trees. take all points from bordering segments.
+5. then start segmenting x2 y0, x1 y1, x0 y2 and so forth. make sure to always append the bordering trees from the neighboring one or two segments

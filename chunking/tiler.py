@@ -115,7 +115,8 @@ def tile_file(input_path: Union[str, Path], config: TilingConfig) -> List[Path]:
 
     input_stem = path.stem
     written: List[Path] = []
-    for x0, x1, y0, y1, xi, yi in generate_tile_windows(min_x, max_x, min_y, max_y, config.tile_size, config.overlap):
+    # Force no-overlap tiling regardless of config.overlap
+    for x0, x1, y0, y1, xi, yi in generate_tile_windows(min_x, max_x, min_y, max_y, config.tile_size, 0.0):
         mask = mask_points_in_window(xs, ys, x0, x1, y0, y1)
         num_points = int(np.count_nonzero(mask))
         if num_points == 0:

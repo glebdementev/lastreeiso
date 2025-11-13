@@ -11,103 +11,133 @@ from concurrent.futures import ProcessPoolExecutor
 from chunking.config import TilingConfig, DEFAULT_CONFIG
 from chunking.tiler import tile_file
 from chunking.worker import run_treeiso_on_tile
-from chunking.merge import merge_tiles_to_single, processed_tile_path
+from chunking.bordering_clusters_detector import (
+    BORDER_THRESHOLD_UNITS,
+    DIR_POS_X,
+    DIR_POS_Y,
+    parse_tile_indices_from_path,
+    list_borders_for_tile,
+    detect_border_segments,
+    augment_tile_with_border_segments,
+)
 from chunking.scramble import scramble_final_segs_in_place
 import numpy as np
 import laspy
 
 
+def processed_tile_path(tile_path: Path) -> Path:
+    s = str(tile_path)
+    return Path(s[:-4] + "_treeiso.laz")
+
+
+def remove_segments_from_processed_in_place(processed_path: Path, seg_ids_to_remove: set[int]) -> None:
+    if not seg_ids_to_remove:
+        return
+    las = laspy.read(str(processed_path))
+    if "final_segs" not in las.point_format.extra_dimension_names:
+        return
+    labels = np.asarray(las.final_segs, dtype=np.int64)
+    if labels.size == 0:
+        return
+    remove_mask = np.isin(labels, np.fromiter((int(s) for s in seg_ids_to_remove), dtype=np.int64))
+    if not np.any(remove_mask):
+        return
+    keep_mask = ~remove_mask
+    las.points = las.points[keep_mask]
+    # Write back in-place; always as .laz
+    out_path = processed_path if processed_path.suffix.lower() == ".laz" else processed_path.with_suffix(".laz")
+    las.write(str(out_path))
+
+
 def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = DEFAULT_CONFIG) -> List[Path]:
     input_path_resolved = Path(input_path).resolve()
     input_stem = input_path_resolved.stem
-    merged_out = (config.output_dir / f"{input_stem}_merged.laz").resolve()
-
-    # Refuse to run if merged output already exists
-    if merged_out.exists():
-        raise ValueError(f"Merged output already exists: {merged_out}")
-
     ext = config.output_format.value
     existing_tiles = sorted(config.output_dir.glob(f"{input_stem}_x*_y*.{ext}"))
     existing_processed = sorted(config.output_dir.glob(f"{input_stem}_x*_y*_treeiso.laz"))
 
-    # Initialize tile list (do not create yet)
-    tiles: List[Path] = existing_tiles if len(existing_tiles) > 0 else []
-    processed: List[Path] = []
-    just_processed: List[Path] = []
-
+    # Avoid mixing prior results with a new pipeline run
     if len(existing_processed) > 0:
-        # Prefer existing segmented tiles; skip processing
-        processed = existing_processed
-    else:
-        # No segmented tiles yet; ensure we have tiles, then process missing
-        if len(tiles) == 0:
-            tiles = tile_file(input_path_resolved, config)
-        if config.call_treeiso and len(tiles) > 0:
-            to_process = [p for p in tiles if not processed_tile_path(p).exists()]
-            if len(to_process) > 0:
-                with ProcessPoolExecutor() as executor:
-                    list(executor.map(run_treeiso_on_tile, [str(p) for p in to_process]))
-                just_processed = [processed_tile_path(p) for p in to_process if processed_tile_path(p).exists()]
-            processed = [processed_tile_path(p) for p in tiles if processed_tile_path(p).exists()]
+        raise ValueError("Found existing processed tiles; please move or remove them before running the new pipeline.")
 
-    # Scramble only the tiles produced in this run (avoid mutating pre-existing ones)
-    for proc_path in just_processed:
+    # Ensure we have tiles (no-overlap tiling enforced in tiler)
+    tiles: List[Path] = existing_tiles if len(existing_tiles) > 0 else tile_file(input_path_resolved, config)
+
+    if len(tiles) == 0:
+        return tiles
+
+    # Index tiles by their (xi, yi)
+    coord_to_tile: dict[tuple[int, int], Path] = {}
+    coords: List[tuple[int, int]] = []
+    for t in tiles:
+        xi, yi = parse_tile_indices_from_path(t)
+        coord = (xi, yi)
+        coord_to_tile[coord] = t
+        coords.append(coord)
+
+    existing_coords = set(coords)
+
+    def wavefront_key(c: tuple[int, int]) -> tuple[int, int]:
+        x, y = c
+        return (x + y, x)
+
+    # Start at (0,0) if available, otherwise minimal wavefront order
+    coords_sorted = sorted(coords, key=wavefront_key)
+    if (0, 0) in existing_coords:
+        # Reorder to ensure (0,0) first while keeping wavefront grouping
+        coords_sorted = [(0, 0)] + [c for c in coords_sorted if c != (0, 0)]
+
+    processed_map: dict[tuple[int, int], Path] = {}
+    border_sets: dict[tuple[tuple[int, int], str], set[int]] = {}
+
+    for coord in coords_sorted:
+        xi, yi = coord
+        base_tile_path = coord_to_tile[coord]
+
+        # Augment from left (pos_x of left neighbor) and bottom (pos_y of bottom neighbor), if present
+        neighbor_inputs: list[tuple[Path, set[int]]] = []
+        left = (xi - 1, yi)
+        bottom = (xi, yi - 1)
+        if left in processed_map:
+            segs = border_sets.get((left, DIR_POS_X), set())
+            if len(segs) > 0:
+                neighbor_inputs.append((processed_map[left], segs))
+        if bottom in processed_map:
+            segs = border_sets.get((bottom, DIR_POS_Y), set())
+            if len(segs) > 0:
+                neighbor_inputs.append((processed_map[bottom], segs))
+
+        if len(neighbor_inputs) > 0:
+            aug_path = base_tile_path.with_name(f"{base_tile_path.stem}_aug{base_tile_path.suffix}")
+            seg_input = augment_tile_with_border_segments(base_tile_path, neighbor_inputs, aug_path)
+        else:
+            seg_input = base_tile_path
+
+        # Segment this tile
+        if config.call_treeiso:
+            run_treeiso_on_tile(str(seg_input))
+        proc_path = processed_tile_path(seg_input)
+
+        # Detect bordering segments for neighbors in +X and +Y directions
+        borders = list_borders_for_tile(xi, yi, existing_coords)
+        segs_to_remove: set[int] = set()
+        if DIR_POS_X in borders:
+            segs_x = detect_border_segments(proc_path, DIR_POS_X, BORDER_THRESHOLD_UNITS)
+            border_sets[(coord, DIR_POS_X)] = segs_x
+            segs_to_remove.update(segs_x)
+        if DIR_POS_Y in borders:
+            segs_y = detect_border_segments(proc_path, DIR_POS_Y, BORDER_THRESHOLD_UNITS)
+            border_sets[(coord, DIR_POS_Y)] = segs_y
+            segs_to_remove.update(segs_y)
+
+        # Remove those bordering segments from this processed tile
+        remove_segments_from_processed_in_place(proc_path, segs_to_remove)
         scramble_final_segs_in_place(proc_path)
 
-    # Ensure global uniqueness of final_segs across tiles before merging
-    if len(processed) > 0:
-        ensure_global_unique_final_segs(processed)
+        processed_map[coord] = proc_path
 
-    if len(processed) > 0:
-        merge_tiles_to_single(processed, merged_out)
-        # Scramble final_segs on the merged result as well
-        scramble_final_segs_in_place(merged_out)
-        # Remove per-tile .laz files so only the merged file remains
-        for proc in processed:
-            if proc.exists() and proc.suffix.lower() == ".laz":
-                proc.unlink()
-        for tile in tiles:
-            if tile.exists() and tile.suffix.lower() == ".laz":
-                tile.unlink()
     return tiles
 
-
-def ensure_global_unique_final_segs(processed_paths: List[Path]) -> None:
-    paths_sorted = sorted(processed_paths, key=lambda p: p.name)
-    next_label: int = 1
-    # Remap each tile's labels into a disjoint global range
-    for tile_path in paths_sorted:
-        las = laspy.read(str(tile_path))
-        # Require presence of final_segs on processed tiles
-        has_final = "final_segs" in las.point_format.extra_dimension_names
-        assert has_final, f"Missing final_segs in processed tile: {tile_path}"
-        labels = np.asarray(las.final_segs, dtype=np.int64)
-        if labels.size == 0:
-            # Nothing to do
-            continue
-        unique_vals = np.unique(labels)
-        # Build mapping old -> new contiguous labels
-        mapping: dict[int, int] = {}
-        for val in unique_vals.tolist():
-            mapping[int(val)] = next_label
-            next_label = next_label + 1
-        remapped = np.empty_like(labels)
-        for old, new in mapping.items():
-            remapped[labels == int(old)] = int(new)
-        las.final_segs = remapped.astype(np.int32, copy=False)
-        out_path = tile_path if tile_path.suffix.lower() == ".laz" else tile_path.with_suffix(".laz")
-        las.write(str(out_path))
-    # Validate disjointness across all tiles
-    seen: set[int] = set()
-    for tile_path in paths_sorted:
-        las = laspy.read(str(tile_path))
-        labels = np.asarray(las.final_segs, dtype=np.int64)
-        uniques = np.unique(labels).tolist()
-        for v in uniques:
-            iv = int(v)
-            if iv in seen:
-                raise ValueError(f"final_segs id collision across tiles detected after remap: {iv} in {tile_path.name}")
-            seen.add(iv)
 
 def main() -> None:
     path_input = str(input('Please enter path to LAS/LAZ file: '))
