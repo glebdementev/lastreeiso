@@ -91,6 +91,36 @@ def detect_border_segments(
     raise ValueError(f"Unsupported direction: {direction}")
 
 
+def border_cache_path(processed_tile_path: Path, direction: str) -> Path:
+    stem = processed_tile_path.stem
+    return processed_tile_path.with_name(f"{stem}_{direction}_border.laz")
+
+
+def export_border_points(
+    processed_tile_path: Path,
+    segment_ids: Set[int],
+    output_path: Path,
+) -> Path:
+    """Write only points belonging to given segment_ids into output_path."""
+    if not segment_ids:
+        return output_path
+    las = laspy.read(str(processed_tile_path))
+    if "final_segs" not in las.point_format.extra_dimension_names:
+        return output_path
+    labels = np.asarray(las.final_segs, dtype=np.int64)
+    if labels.size == 0:
+        return output_path
+    mask = np.isin(labels, np.fromiter((int(s) for s in segment_ids), dtype=np.int64))
+    if not np.any(mask):
+        return output_path
+    out_header = las.header.copy()
+    out = laspy.LasData(out_header)
+    out.points = las.points[mask]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    out.write(str(output_path))
+    return output_path
+
+
 def _align_points_dtype(points: np.ndarray, target_dtype: np.dtype) -> np.ndarray:
     """Create a view/copy of points with only fields present in target dtype."""
     out = np.empty(points.shape, dtype=target_dtype)
@@ -144,9 +174,18 @@ def augment_tile_with_border_segments(
         base_las.write(str(output_aug_path))
         return output_aug_path
 
+    # Concatenate as numpy structured array first
     concat_points = np.concatenate([base_points] + extra_chunks, axis=0)
+    # Build a proper PointRecord matching the base header/point_format,
+    # then fill it field-by-field from the structured array
+    total_points = int(concat_points.shape[0])
+    pr = laspy.ScaleAwarePointRecord.zeros(total_points, header=base_header)
+    pr_array = pr.array
+    for name in (base_dtype.names or ()):
+        pr_array[name] = concat_points[name]
+
     out_las = laspy.LasData(base_header)
-    out_las.points = concat_points
+    out_las.points = pr
     output_aug_path.parent.mkdir(parents=True, exist_ok=True)
     out_las.write(str(output_aug_path))
     return output_aug_path

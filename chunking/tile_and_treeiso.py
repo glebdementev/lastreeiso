@@ -19,8 +19,11 @@ from chunking.bordering_clusters_detector import (
     list_borders_for_tile,
     detect_border_segments,
     augment_tile_with_border_segments,
+    border_cache_path,
+    export_border_points,
 )
 from chunking.scramble import scramble_final_segs_in_place
+from chunking.merge import merge_tiles_to_single
 import numpy as np
 import laspy
 
@@ -81,61 +84,89 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
         x, y = c
         return (x + y, x)
 
-    # Start at (0,0) if available, otherwise minimal wavefront order
+    # Group coordinates by wavefront (sum index)
     coords_sorted = sorted(coords, key=wavefront_key)
-    if (0, 0) in existing_coords:
-        # Reorder to ensure (0,0) first while keeping wavefront grouping
-        coords_sorted = [(0, 0)] + [c for c in coords_sorted if c != (0, 0)]
+    from collections import defaultdict
+    waves: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for c in coords_sorted:
+        s = c[0] + c[1]
+        waves[s].append(c)
+    if 0 in waves and (0, 0) in waves[0]:
+        # ensure (0,0) first inside its wave
+        w0 = waves[0]
+        waves[0] = [(0, 0)] + [c for c in w0 if c != (0, 0)]
 
     processed_map: dict[tuple[int, int], Path] = {}
-    border_sets: dict[tuple[tuple[int, int], str], set[int]] = {}
+    # Map of ((xi, yi), direction) -> (cache_file_path, segment_ids)
+    edge_cache_map: dict[tuple[tuple[int, int], str], tuple[Path, set[int]]] = {}
 
-    for coord in coords_sorted:
-        xi, yi = coord
-        base_tile_path = coord_to_tile[coord]
+    for wave_idx in sorted(waves.keys()):
+        wave_coords = waves[wave_idx]
+        # Build augmented inputs using cached border points from previous waves
+        seg_inputs: list[Path] = []
+        coords_for_inputs: list[tuple[int, int]] = []
+        for coord in wave_coords:
+            xi, yi = coord
+            base_tile_path = coord_to_tile[coord]
+            neighbor_point_files: list[tuple[Path, set[int]]] = []
+            left = (xi - 1, yi)
+            bottom = (xi, yi - 1)
+            if left in processed_map:
+                entry = edge_cache_map.get((left, DIR_POS_X))
+                if entry is not None and len(entry[1]) > 0:
+                    neighbor_point_files.append(entry)
+            if bottom in processed_map:
+                entry = edge_cache_map.get((bottom, DIR_POS_Y))
+                if entry is not None and len(entry[1]) > 0:
+                    neighbor_point_files.append(entry)
+            if len(neighbor_point_files) > 0:
+                aug_path = base_tile_path.with_name(f"{base_tile_path.stem}_aug{base_tile_path.suffix}")
+                seg_input = augment_tile_with_border_segments(
+                    base_tile_path,
+                    neighbor_point_files,
+                    aug_path,
+                )
+            else:
+                seg_input = base_tile_path
+            seg_inputs.append(seg_input)
+            coords_for_inputs.append(coord)
 
-        # Augment from left (pos_x of left neighbor) and bottom (pos_y of bottom neighbor), if present
-        neighbor_inputs: list[tuple[Path, set[int]]] = []
-        left = (xi - 1, yi)
-        bottom = (xi, yi - 1)
-        if left in processed_map:
-            segs = border_sets.get((left, DIR_POS_X), set())
-            if len(segs) > 0:
-                neighbor_inputs.append((processed_map[left], segs))
-        if bottom in processed_map:
-            segs = border_sets.get((bottom, DIR_POS_Y), set())
-            if len(segs) > 0:
-                neighbor_inputs.append((processed_map[bottom], segs))
+        # Segment this entire wave in parallel
+        if config.call_treeiso and len(seg_inputs) > 0:
+            with ProcessPoolExecutor() as executor:
+                list(executor.map(run_treeiso_on_tile, [str(p) for p in seg_inputs]))
 
-        if len(neighbor_inputs) > 0:
-            aug_path = base_tile_path.with_name(f"{base_tile_path.stem}_aug{base_tile_path.suffix}")
-            seg_input = augment_tile_with_border_segments(base_tile_path, neighbor_inputs, aug_path)
-        else:
-            seg_input = base_tile_path
+        # After segmentation, detect and export border points, then delete from tile and scramble
+        for coord, seg_input in zip(coords_for_inputs, seg_inputs):
+            xi, yi = coord
+            proc_path = processed_tile_path(seg_input)
+            borders = list_borders_for_tile(xi, yi, existing_coords)
 
-        # Segment this tile
-        if config.call_treeiso:
-            run_treeiso_on_tile(str(seg_input))
-        proc_path = processed_tile_path(seg_input)
+            if DIR_POS_X in borders:
+                segs_x = detect_border_segments(proc_path, DIR_POS_X, BORDER_THRESHOLD_UNITS)
+                cache_x = border_cache_path(proc_path, DIR_POS_X)
+                export_border_points(proc_path, segs_x, cache_x)
+                edge_cache_map[(coord, DIR_POS_X)] = (cache_x, segs_x)
+            if DIR_POS_Y in borders:
+                segs_y = detect_border_segments(proc_path, DIR_POS_Y, BORDER_THRESHOLD_UNITS)
+                cache_y = border_cache_path(proc_path, DIR_POS_Y)
+                export_border_points(proc_path, segs_y, cache_y)
+                edge_cache_map[(coord, DIR_POS_Y)] = (cache_y, segs_y)
 
-        # Detect bordering segments for neighbors in +X and +Y directions
-        borders = list_borders_for_tile(xi, yi, existing_coords)
-        segs_to_remove: set[int] = set()
-        if DIR_POS_X in borders:
-            segs_x = detect_border_segments(proc_path, DIR_POS_X, BORDER_THRESHOLD_UNITS)
-            border_sets[(coord, DIR_POS_X)] = segs_x
-            segs_to_remove.update(segs_x)
-        if DIR_POS_Y in borders:
-            segs_y = detect_border_segments(proc_path, DIR_POS_Y, BORDER_THRESHOLD_UNITS)
-            border_sets[(coord, DIR_POS_Y)] = segs_y
-            segs_to_remove.update(segs_y)
+            # Remove exported bordering segments from this processed tile
+            segs_to_remove: set[int] = set()
+            if (coord, DIR_POS_X) in edge_cache_map:
+                segs_to_remove.update(edge_cache_map[(coord, DIR_POS_X)][1])
+            if (coord, DIR_POS_Y) in edge_cache_map:
+                segs_to_remove.update(edge_cache_map[(coord, DIR_POS_Y)][1])
+            remove_segments_from_processed_in_place(proc_path, segs_to_remove)
+            scramble_final_segs_in_place(proc_path)
+            processed_map[coord] = proc_path
 
-        # Remove those bordering segments from this processed tile
-        remove_segments_from_processed_in_place(proc_path, segs_to_remove)
-        scramble_final_segs_in_place(proc_path)
-
-        processed_map[coord] = proc_path
-
+    # Final merge
+    processed_list = [processed_map[c] for c in sorted(processed_map.keys(), key=wavefront_key)]
+    merged_out = (config.output_dir / f"{input_stem}_merged.laz").resolve()
+    merge_tiles_to_single(processed_list, merged_out)
     return tiles
 
 
