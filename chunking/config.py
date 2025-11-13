@@ -20,7 +20,7 @@ class TilingConfig:
 DEFAULT_CONFIG = TilingConfig(
     output_dir=Path("tiles").resolve(),
     tile_size=40.0,
-    overlap=2.0,
+    overlap=0.0,
     output_format=OutputFormat.LAZ,
     call_treeiso=True,
 )

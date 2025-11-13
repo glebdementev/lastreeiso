@@ -27,6 +27,7 @@ from chunking.merge import merge_tiles_to_single
 import numpy as np
 import laspy
 
+from chunking.preprocess import preprocess_las_file
 
 def processed_tile_path(tile_path: Path) -> Path:
     s = str(tile_path)
@@ -56,15 +57,24 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
     input_path_resolved = Path(input_path).resolve()
     input_stem = input_path_resolved.stem
     ext = config.output_format.value
-    existing_tiles = sorted(config.output_dir.glob(f"{input_stem}_x*_y*.{ext}"))
-    existing_processed = sorted(config.output_dir.glob(f"{input_stem}_x*_y*_treeiso.laz"))
+    # Preprocess input (SOR, decimate, dedup) before tiling
+    preproc_out = preprocess_las_file(
+        input_path_resolved,
+        config.output_dir / f"{input_stem}_preproc.laz",
+        sor_k=10,
+        sor_std=1.0,
+        decimation_res_m=0.02,
+    )
+    preproc_stem = Path(preproc_out).stem
+    existing_tiles = sorted(config.output_dir.glob(f"{preproc_stem}_x*_y*.{ext}"))
+    existing_processed = sorted(config.output_dir.glob(f"{preproc_stem}_x*_y*_treeiso.laz"))
 
     # Avoid mixing prior results with a new pipeline run
     if len(existing_processed) > 0:
         raise ValueError("Found existing processed tiles; please move or remove them before running the new pipeline.")
 
     # Ensure we have tiles (no-overlap tiling enforced in tiler)
-    tiles: List[Path] = existing_tiles if len(existing_tiles) > 0 else tile_file(input_path_resolved, config)
+    tiles: List[Path] = existing_tiles if len(existing_tiles) > 0 else tile_file(preproc_out, config)
 
     if len(tiles) == 0:
         return tiles
