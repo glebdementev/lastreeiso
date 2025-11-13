@@ -28,6 +28,11 @@ import numpy as np
 import laspy
 
 from chunking.preprocess import preprocess_las_file
+from chunking.labels import (
+    relabel_final_segs_with_offset,
+    relabel_and_scramble_final_segs_contiguous_in_place,
+)
+
 
 def processed_tile_path(tile_path: Path) -> Path:
     s = str(tile_path)
@@ -109,6 +114,8 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
     processed_map: dict[tuple[int, int], Path] = {}
     # Map of ((xi, yi), direction) -> (cache_file_path, segment_ids)
     edge_cache_map: dict[tuple[tuple[int, int], str], tuple[Path, set[int]]] = {}
+    # Global running maximum segment ID across all processed tiles
+    current_max_seg_id: int = 0
 
     for wave_idx in sorted(waves.keys()):
         wave_coords = waves[wave_idx]
@@ -146,10 +153,16 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
             with ProcessPoolExecutor() as executor:
                 list(executor.map(run_treeiso_on_tile, [str(p) for p in seg_inputs]))
 
-        # After segmentation, detect and export border points, then delete from tile and scramble
+        # After segmentation, relabel with global offset, detect and export border points,
+        # then delete from tile and scramble.
         for coord, seg_input in zip(coords_for_inputs, seg_inputs):
             xi, yi = coord
             proc_path = processed_tile_path(seg_input)
+
+            # Ensure this tile's positive segment IDs occupy a unique, non-overlapping
+            # range starting from current_max_seg_id + 1.
+            current_max_seg_id = relabel_final_segs_with_offset(proc_path, current_max_seg_id)
+
             borders = list_borders_for_tile(xi, yi, existing_coords)
 
             if DIR_POS_X in borders:
@@ -176,7 +189,12 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
     # Final merge
     processed_list = [processed_map[c] for c in sorted(processed_map.keys(), key=wavefront_key)]
     merged_out = (config.output_dir / f"{input_stem}_merged.laz").resolve()
-    merge_tiles_to_single(processed_list, merged_out)
+    merged_path = merge_tiles_to_single(processed_list, merged_out)
+
+    # Ensure final file has globally contiguous labels 1..N (positive IDs only) and
+    # scramble those IDs for reproducibility.
+    relabel_and_scramble_final_segs_contiguous_in_place(merged_path)
+
     return tiles
 
 
