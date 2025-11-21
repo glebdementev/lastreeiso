@@ -25,6 +25,7 @@ from chunking.bordering_clusters_detector import (
 from chunking.scramble import scramble_final_segs_in_place
 from chunking.merge import merge_tiles_to_single
 from chunking.postfilter import drop_low_segments_in_place
+from chunking.refine_segments import refine_segments_with_treeiso
 import numpy as np
 import laspy
 
@@ -191,13 +192,17 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
     merged_out = (config.output_dir / f"{input_stem}_merged.laz").resolve()
     merged_path = merge_tiles_to_single(processed_list, merged_out)
 
-    # Ensure final file has globally contiguous labels 1..N (positive IDs only) and
-    # scramble those IDs for reproducibility.
-    relabel_and_scramble_final_segs_contiguous_in_place(merged_path)
+    # Refine existing segments by re-running treeiso on each segment separately,
+    # until fewer than ~70% of refined segments produce a single segment as result.
+    refine_segments_with_treeiso(merged_path, max_single_fraction=0.7)
 
     # Drop segments whose maximum Z is below a given threshold (in meters) from the
     # final merged point cloud. Uses default threshold of 5.0 m.
     drop_low_segments_in_place(merged_path, z_threshold=5.0)
+
+    # Ensure final file has globally contiguous labels 1..N (positive IDs only) and
+    # scramble those IDs for reproducibility.
+    relabel_and_scramble_final_segs_contiguous_in_place(merged_path)
 
     return tiles
 
