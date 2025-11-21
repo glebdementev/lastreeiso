@@ -10,10 +10,13 @@ from chunking.tile_and_treeiso import tile_and_process_file
 def iter_las_files(root: Path) -> Iterable[Path]:
     """
     Recursively yield all LAS/LAZ files under the given root directory.
+
+    Uses suffix-based filtering so that both lower- and upper-case extensions
+    (.las, .LAS, .laz, .LAZ) are detected.
     """
-    exts = (".las", ".laz")
-    for ext in exts:
-        yield from root.rglob(f"*{ext}")
+    for p in root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in (".las", ".laz"):
+            yield p
 
 
 def _process_single_file(las_path: Path) -> None:
@@ -58,13 +61,42 @@ def process_dataset(root: Path, max_workers: int | None = None) -> None:
         print(f"No LAS/LAZ files found under {root}")
         return
 
-    # Remove already-segmented outputs from the queue
-    files_to_process = [p for p in las_files if not p.name.lower().endswith("_iso.laz")]
+    # Select only those LAS/LAZ files that:
+    #  1) Are not *_iso.laz themselves
+    #  2) Have at least one .geojson file in the same folder
+    #  3) Do NOT yet have a corresponding *_iso.laz file next to them
+    files_to_process = []
+    for p in las_files:
+        name_lower = p.name.lower()
+        if name_lower.endswith("_iso.laz"):
+            continue
+
+        # Condition 2: there must be at least one .geojson file in the same folder
+        parent = p.parent
+        has_geojson = any(
+            child.is_file() and child.suffix.lower() == ".geojson"
+            for child in parent.iterdir()
+        )
+        if not has_geojson:
+            continue
+
+        # Condition 3: skip if the expected *_iso.laz already exists
+        expected_iso = p.with_name(f"{p.stem}_iso.laz")
+        if expected_iso.exists():
+            continue
+
+        files_to_process.append(p)
+
     if not files_to_process:
-        print(f"All LAS/LAZ files under {root} appear to be already segmented.")
+        print(
+            f"No LAS/LAZ files under {root} meet all conditions: "
+            f'has sibling .geojson and no corresponding "*_iso.laz" yet.'
+        )
         return
 
-    print(f"Found {len(files_to_process)} LAS/LAZ files to process under {root}")
+    print(f"Found {len(files_to_process)} LAS/LAZ files to process under {root}:")
+    for p in files_to_process:
+        print(f"  {p}")
 
     if max_workers is None:
         # Be conservative to avoid oversubscribing too many inner process pools.
@@ -78,6 +110,34 @@ def process_dataset(root: Path, max_workers: int | None = None) -> None:
                 fut.result()
             except Exception as e:
                 print(f"Error processing {las_path}: {e}", flush=True)
+
+    # After processing, report any inputs that still do not have a corresponding
+    # *_iso.laz output next to them, *for those that satisfy the same preconditions*
+    # (have a sibling .geojson). This helps identify files that failed.
+    missing_outputs = []
+    for p in las_files:
+        name_lower = p.name.lower()
+        if name_lower.endswith("_iso.laz"):
+            continue
+
+        parent = p.parent
+        has_geojson = any(
+            child.is_file() and child.suffix.lower() == ".geojson"
+            for child in parent.iterdir()
+        )
+        if not has_geojson:
+            continue
+
+        expected_iso = p.with_name(f"{p.stem}_iso.laz")
+        if not expected_iso.exists():
+            missing_outputs.append(p)
+
+    if missing_outputs:
+        print("\nWARNING: the following LAS/LAZ files do NOT have a corresponding *_iso.laz output:")
+        for p in missing_outputs:
+            print(f"  {p}")
+    else:
+        print("\nAll LAS/LAZ files have corresponding *_iso.laz outputs.")
 
 
 def main() -> None:
