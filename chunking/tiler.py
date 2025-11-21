@@ -43,9 +43,8 @@ def generate_tile_windows(
     min_y: float,
     max_y: float,
     tile_size: float,
-    overlap: float,
 ) -> Generator[Tuple[float, float, float, float, int, int], None, None]:
-    step = tile_size - overlap
+    step = tile_size
     x_starts: List[float] = []
     y_starts: List[float] = []
 
@@ -104,8 +103,6 @@ def tile_file(input_path: Union[str, Path], config: TilingConfig) -> List[Path]:
     assert path.exists(), "Input file does not exist"
     assert path.suffix.lower() in (".las", ".laz"), "Input must be .las or .laz"
     assert config.tile_size > 0.0, "Tile size must be positive"
-    assert config.overlap >= 0.0, "Overlap must be non-negative"
-    assert config.overlap < config.tile_size, "Overlap must be smaller than tile size"
 
     las = laspy.read(str(path))
     las = deduplicate_points(las)
@@ -115,8 +112,7 @@ def tile_file(input_path: Union[str, Path], config: TilingConfig) -> List[Path]:
 
     input_stem = path.stem
     written: List[Path] = []
-    # Force no-overlap tiling regardless of config.overlap
-    for x0, x1, y0, y1, xi, yi in generate_tile_windows(min_x, max_x, min_y, max_y, config.tile_size, 0.0):
+    for x0, x1, y0, y1, xi, yi in generate_tile_windows(min_x, max_x, min_y, max_y, config.tile_size):
         mask = mask_points_in_window(xs, ys, x0, x1, y0, y1)
         num_points = int(np.count_nonzero(mask))
         if num_points == 0:

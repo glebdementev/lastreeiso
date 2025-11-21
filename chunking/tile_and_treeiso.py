@@ -24,6 +24,7 @@ from chunking.bordering_clusters_detector import (
 )
 from chunking.scramble import scramble_final_segs_in_place
 from chunking.merge import merge_tiles_to_single
+from chunking.postfilter import drop_low_segments_in_place
 import numpy as np
 import laspy
 
@@ -78,7 +79,6 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
     if len(existing_processed) > 0:
         raise ValueError("Found existing processed tiles; please move or remove them before running the new pipeline.")
 
-    # Ensure we have tiles (no-overlap tiling enforced in tiler)
     tiles: List[Path] = existing_tiles if len(existing_tiles) > 0 else tile_file(preproc_out, config)
 
     if len(tiles) == 0:
@@ -194,6 +194,10 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
     # Ensure final file has globally contiguous labels 1..N (positive IDs only) and
     # scramble those IDs for reproducibility.
     relabel_and_scramble_final_segs_contiguous_in_place(merged_path)
+
+    # Drop segments whose maximum Z is below a given threshold (in meters) from the
+    # final merged point cloud. Uses default threshold of 5.0 m.
+    drop_low_segments_in_place(merged_path, z_threshold=5.0)
 
     return tiles
 
