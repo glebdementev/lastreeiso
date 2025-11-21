@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import List, Union
+import shutil
 
 # Ensure repository root is on path so we can import PythonCpp.treeiso when run as a script
 import sys
@@ -64,23 +65,47 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
     input_path_resolved = Path(input_path).resolve()
     input_stem = input_path_resolved.stem
     ext = config.output_format.value
+
+    # Use a per-input working directory inside the configured output_dir to avoid
+    # collisions when multiple files are processed in parallel or share the same
+    # base name. Final merged *_iso.laz is still written directly into
+    # config.output_dir, next to (or under) the desired location.
+    work_dir = (config.output_dir / input_stem).resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
+
     # Preprocess input (SOR, decimate, dedup) before tiling
     preproc_out = preprocess_las_file(
         input_path_resolved,
-        config.output_dir / f"{input_stem}_preproc.laz",
+        work_dir / f"{input_stem}_preproc.laz",
         sor_k=10,
         sor_std=1.0,
         decimation_res_m=0.02,
     )
     preproc_stem = Path(preproc_out).stem
-    existing_tiles = sorted(config.output_dir.glob(f"{preproc_stem}_x*_y*.{ext}"))
-    existing_processed = sorted(config.output_dir.glob(f"{preproc_stem}_x*_y*_treeiso.laz"))
+    existing_tiles = sorted(work_dir.glob(f"{preproc_stem}_x*_y*.{ext}"))
+    existing_processed = sorted(work_dir.glob(f"{preproc_stem}_x*_y*_treeiso.laz"))
 
-    # Avoid mixing prior results with a new pipeline run
+    # If there are existing processed tiles from a previous run, remove them so we
+    # can safely re-run the pipeline without manual cleanup.
     if len(existing_processed) > 0:
-        raise ValueError("Found existing processed tiles; please move or remove them before running the new pipeline.")
+        for p in existing_processed:
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+        existing_processed = []
 
-    tiles: List[Path] = existing_tiles if len(existing_tiles) > 0 else tile_file(preproc_out, config)
+    # For tiling we write into the per-input working directory.
+    if len(existing_tiles) > 0:
+        tiles: List[Path] = existing_tiles
+    else:
+        tile_config = TilingConfig(
+            output_dir=work_dir,
+            tile_size=config.tile_size,
+            output_format=config.output_format,
+            call_treeiso=config.call_treeiso,
+        )
+        tiles = tile_file(preproc_out, tile_config)
 
     if len(tiles) == 0:
         return tiles
@@ -189,7 +214,7 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
 
     # Final merge
     processed_list = [processed_map[c] for c in sorted(processed_map.keys(), key=wavefront_key)]
-    merged_out = (config.output_dir / f"{input_stem}_merged.laz").resolve()
+    merged_out = (config.output_dir / f"{input_stem}_iso.laz").resolve()
     merged_path = merge_tiles_to_single(processed_list, merged_out)
 
     # Refine existing segments by re-running treeiso on each segment separately,
@@ -203,6 +228,14 @@ def tile_and_process_file(input_path: Union[str, Path], config: TilingConfig = D
     # Ensure final file has globally contiguous labels 1..N (positive IDs only) and
     # scramble those IDs for reproducibility.
     relabel_and_scramble_final_segs_contiguous_in_place(merged_path)
+
+    # Cleanup per-input working directory (tiles, preproc, border caches) so that
+    # only the final *_iso.laz remains in the target output directory.
+    try:
+        shutil.rmtree(work_dir, ignore_errors=True)
+    except Exception:
+        # Best-effort cleanup; failures here should not break the pipeline.
+        pass
 
     return tiles
 
